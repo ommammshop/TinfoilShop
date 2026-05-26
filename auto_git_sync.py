@@ -27,19 +27,25 @@ class AutoSyncHandler(FileSystemEventHandler):
     def __init__(self):
         super().__init__()
         self.last_sync_time = 0
-        self.cooldown = 2
+        self.cooldown = 3  # ปรับเป็น 3 วินาทีเผื่อไฟล์ขนาดใหญ่
 
     def on_created(self, event):
         if not event.is_directory and event.src_path.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
-            print(f"\n[+] เจอรูปใหม่: {os.path.basename(event.src_path)}")
-            self.process_sync(event.src_path)
+            self.trigger_sync(event.src_path, "เจอรูปใหม่")
 
     def on_modified(self, event):
         if not event.is_directory and event.src_path.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
-            current_time = time.time()
-            if current_time - self.last_sync_time > self.cooldown:
-                self.process_sync(event.src_path)
-                self.last_sync_time = current_time
+            self.trigger_sync(event.src_path, "มีการแก้ไขรูป")
+
+    def trigger_sync(self, file_path, action_msg):
+        current_time = time.time()
+        # เช็คว่าผ่านเวลา Cooldown หรือยัง เพื่อป้องกันการทำงานซ้ำซ้อน
+        if current_time - self.last_sync_time > self.cooldown:
+            self.last_sync_time = current_time
+            print(f"\n[+] {action_msg}: {os.path.basename(file_path)}")
+            # หน่วงเวลาเล็กน้อยให้ OS เขียนไฟล์ลงดิสก์จนเสร็จสมบูรณ์ 100%
+            time.sleep(1) 
+            self.process_sync(file_path)
 
     def process_sync(self, file_path):
         file_name = os.path.basename(file_path)
@@ -47,21 +53,31 @@ class AutoSyncHandler(FileSystemEventHandler):
         repo_dir = os.path.dirname(os.path.abspath(WATCH_DIR))
         
         try:
-            # สั่ง GitHub Desktop (git) ทำงานอัตโนมัติ
+            # 1. สั่ง Add ไฟล์ทั้งหมดก่อน
             subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, stdout=subprocess.DEVNULL)
+            
+            # 2. เช็คว่ามีอะไรให้ Commit ไหม (ป้องกัน Error exit status 1)
+            status = subprocess.run(["git", "status", "--porcelain"], cwd=repo_dir, capture_output=True, text=True)
+            if not status.stdout.strip():
+                print(f"[-] รูป {file_name} ถูกอัปโหลดไปแล้ว ข้ามการทำงาน...")
+                return
+
+            # 3. สั่ง Commit และ Push
             subprocess.run(["git", "commit", "-m", f"Auto-sync cover: {file_name}"], cwd=repo_dir, check=True, stdout=subprocess.DEVNULL)
             subprocess.run(["git", "push", "origin", GITHUB_BRANCH], cwd=repo_dir, check=True, stdout=subprocess.DEVNULL)
             print(f"[✓] อัปโหลดรูป {file_name} ขึ้น GitHub สำเร็จ!")
             
-            # สร้างลิงก์ตรงสำหรับ Tinfoil
+            # 4. สร้างลิงก์ตรงสำหรับ Tinfoil
             github_raw_url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{IMAGE_FOLDER_IN_REPO}/{file_name}"
             print(f"[L] ลิงก์รูป: {github_raw_url}")
             
-            # ส่งข้อมูลกลับไปที่หลังบ้านของร้าน
+            # 5. ส่งข้อมูลกลับไปที่หลังบ้านของร้าน
             self.sync_with_store_server(game_code, github_raw_url)
             
+        except subprocess.CalledProcessError as e:
+            print(f"[X] เกิดข้อผิดพลาดกับคำสั่ง Git: {e}")
         except Exception as e:
-            print(f"[X] เกิดข้อผิดพลาด: {e}")
+            print(f"[X] เกิดข้อผิดพลาดระบบ: {e}")
 
     def sync_with_store_server(self, game_code, raw_url):
         payload = {
